@@ -1608,6 +1608,11 @@ fn prepare_explicit_remote_herdr(
 }
 
 /// Parse `<product> <version>` from a remote `--version` probe.
+///
+/// A1-03/task-53: the explicit `--remote-binary` identity must match *this*
+/// build's product name. A product `jacquard-term` build must not silently
+/// accept an upstream `herdr` 0.9.5 binary that happens to report the same
+/// version (and vice versa for an upstream build).
 fn parse_remote_binary_version(stdout: &str) -> Option<String> {
     let line = stdout
         .lines()
@@ -1615,7 +1620,7 @@ fn parse_remote_binary_version(stdout: &str) -> Option<String> {
         .find(|line| !line.is_empty())?;
     let mut parts = line.split_whitespace();
     let program = parts.next()?;
-    if program != "jacquard-term" && program != "herdr" {
+    if program != crate::product::NAME {
         return None;
     }
     parts.next().map(str::to_string)
@@ -6246,17 +6251,47 @@ function Get-Process {
     }
 
     #[test]
-    fn remote_binary_version_parse_accepts_product_and_upstream_binaries() {
+    fn remote_binary_version_parse_enforces_product_identity() {
+        #[cfg(feature = "jacquard-product")]
         assert_eq!(
             parse_remote_binary_version("jacquard-term 0.9.5\n").as_deref(),
             Some("0.9.5")
         );
+        #[cfg(not(feature = "jacquard-product"))]
+        assert_eq!(
+            parse_remote_binary_version("jacquard-term 0.9.5\n"),
+            None,
+            "upstream build must reject product identity"
+        );
+        #[cfg(not(feature = "jacquard-product"))]
         assert_eq!(
             parse_remote_binary_version("\nherdr 0.9.5\n").as_deref(),
             Some("0.9.5")
         );
+        #[cfg(feature = "jacquard-product")]
+        assert_eq!(
+            parse_remote_binary_version("\nherdr 0.9.5\n"),
+            None,
+            "product build must reject upstream herdr identity"
+        );
         assert_eq!(parse_remote_binary_version("unexpected output"), None);
         assert_eq!(parse_remote_binary_version("jacquard-term"), None);
+    }
+
+    #[test]
+    fn remote_binary_identity_matches_the_build_product() {
+        let product = parse_remote_binary_version("jacquard-term 0.9.5\n");
+        let upstream = parse_remote_binary_version("herdr 0.9.5\n");
+        if cfg!(feature = "jacquard-product") {
+            assert_eq!(product.as_deref(), Some("0.9.5"));
+            assert_eq!(
+                upstream, None,
+                "product build must reject an upstream herdr binary with the same version"
+            );
+        } else {
+            assert_eq!(product, None);
+            assert_eq!(upstream.as_deref(), Some("0.9.5"));
+        }
     }
 
     #[test]
