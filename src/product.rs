@@ -80,6 +80,48 @@ pub const EXTERNAL_MANIFEST_UPDATES_ENABLED: bool = !IS_JACQUARD_PRODUCT;
 /// download or copy one implicitly.
 pub const REMOTE_AUTO_INSTALL_ENABLED: bool = !IS_JACQUARD_PRODUCT;
 
+/// Remove inherited internal `HERDR_*` environment from product-mode launches.
+///
+/// The bundled `jacquard-term` may be executed from inside a user Herdr pane or
+/// some other parent that exports Herdr's internal protocol variables. Product
+/// builds must never attach to or stop a user Herdr server through those
+/// inherited overrides (A1 plan §7.4/§13.7). `HERDR_STARTUP_CWD` is kept because
+/// it is a private parent-to-child seed hint for a fresh workspace cwd and does
+/// not select a server.
+#[cfg(feature = "jacquard-product")]
+pub fn sanitize_inherited_herdr_env() {
+    // `HERDR_SESSION` is intentionally not cleared: the product's own
+    // `spawn_server_daemon` parent passes a named session to its child through
+    // that variable. It only selects a session name inside the isolated
+    // `jacquard-term` app dir and can never select a user Herdr server; the
+    // server-selection overrides below are the dangerous inherited values.
+    const INHERITED: &[&str] = &[
+        "HERDR_ENV",
+        "HERDR_SOCKET_PATH",
+        "HERDR_CLIENT_SOCKET_PATH",
+        "HERDR_CONFIG_PATH",
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_BIN_PATH",
+    ];
+    for name in INHERITED {
+        std::env::remove_var(name);
+    }
+}
+
+/// Upstream builds keep the parent environment untouched.
+#[cfg(not(feature = "jacquard-product"))]
+pub fn sanitize_inherited_herdr_env() {}
+
+/// Footer used by subcommand `--help` in product builds: the bundled product
+/// must not point agents at upstream Herdr web resources.
+#[cfg(feature = "jacquard-product")]
+pub const AGENT_HELP_FOOTER: &str = "This binary ships inside the Jacquard desktop client release bundle.\nThe plugin marketplace and the local socket API remain available.";
+/// Upstream footer is used for upstream builds.
+#[cfg(not(feature = "jacquard-product"))]
+pub const AGENT_HELP_FOOTER: &str = "";
+
 #[cfg(test)]
 mod tests {
     use super::*;

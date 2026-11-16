@@ -6,7 +6,7 @@ mod completion;
 mod machine;
 
 pub(super) fn command() -> Command {
-    let command = Command::new("herdr")
+    let command = Command::new(crate::product::NAME)
         .about("terminal workspace manager for AI coding agents")
         .disable_help_flag(true)
         .disable_version_flag(true)
@@ -57,7 +57,11 @@ fn configure_help(command: Command, depth: usize) -> Command {
         command.disable_help_flag(false)
     };
     let command = if depth == 1 && command.has_subcommands() {
-        command.after_help(super::AGENT_HELP_FOOTER)
+        if crate::product::IS_JACQUARD_PRODUCT {
+            command.after_help(crate::product::AGENT_HELP_FOOTER)
+        } else {
+            command.after_help(super::AGENT_HELP_FOOTER)
+        }
     } else {
         command
     };
@@ -92,7 +96,7 @@ fn write_requested_help(
     let mut root = command();
     root.build();
     let mut selected = &mut root;
-    let mut path = vec!["herdr".to_string()];
+    let mut path = vec![crate::product::NAME.to_string()];
     for segment in &args[1..help_index] {
         if selected.find_subcommand(segment).is_none() {
             break;
@@ -159,6 +163,20 @@ fn channel_command() -> Command {
 fn server_command() -> Command {
     let command = Command::new("server")
         .about("Run or control the headless server")
+        .arg(flag("managed").help("Managed server mode (jacquard-product builds)"))
+        .arg(flag("detached").help("Start the managed server as a detached daemon"))
+        .arg(option("config", "PATH").help("Explicit managed config.toml path"))
+        .arg(option("session", "NAME").help("Managed session name"))
+        .arg(option("socket", "PATH").help("Explicit managed JSON API socket path"))
+        .arg(option("client-socket", "PATH").help("Explicit managed client socket path"))
+        .subcommand(
+            Command::new("status")
+                .about("Show status of the managed server")
+                .arg(json_flag())
+                .arg(flag("managed").help("Managed server mode (jacquard-product builds)"))
+                .arg(option("session", "NAME").help("Managed session name"))
+                .arg(option("socket", "PATH").help("Explicit managed JSON API socket path")),
+        )
         .subcommand(Command::new("stop").about("Stop the running server"))
         .subcommand(Command::new("reload-config").about("Reload config in the running server"))
         .subcommand(

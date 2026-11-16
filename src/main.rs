@@ -31,6 +31,7 @@ mod ipc;
 mod kitty_graphics;
 mod layout;
 mod logging;
+mod managed;
 mod metadata_tokens;
 mod noninteractive_process;
 mod pane;
@@ -531,6 +532,9 @@ fn print_product_help() {
     println!("       {name} session attach <name>");
     println!("       {name} completion <shell>");
     println!("       {name} status [server|client]");
+    println!("       {name} server --managed [--detached] <managed options>");
+    println!("       {name} server status --managed [--json]");
+    println!("       {name} server stop --managed [--json]");
     println!("       {name} server stop");
     println!("       {name} server reload-config");
     println!("       {name} <command> <subcommand> ...");
@@ -591,6 +595,19 @@ fn main() -> io::Result<()> {
     #[cfg(windows)]
     if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
         return result;
+    }
+    // Product builds never inherit a user Herdr server's internal env (A1
+    // plan §7.4/§13.7); explicit managed CLI/env values are applied below.
+    product::sanitize_inherited_herdr_env();
+    if let Some(outcome) = managed::maybe_run(&raw_args) {
+        let code = match outcome {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("error: {err}");
+                1
+            }
+        };
+        std::process::exit(code);
     }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);

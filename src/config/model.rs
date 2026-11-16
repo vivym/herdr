@@ -323,6 +323,29 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    /// Jacquard Term managed-server profile (A1 Phase 2). Only consulted for
+    /// `jacquard-product` builds; upstream builds ignore it.
+    pub jacquard: JacquardConfig,
+}
+
+/// `[jacquard]` managed-server profile (A1 Phase 2, D4 parameter layers).
+///
+/// Values are the profile layer of the product interface
+/// `CLI flags > JACQUARD_TERM_* env > [jacquard] profile > defaults`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct JacquardConfig {
+    /// Run `server` in managed mode when no CLI/env managed request is present.
+    pub managed: bool,
+    /// Managed session name. Default: `jacquard` in product builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Absolute managed JSON API socket path (required for managed mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_socket: Option<String>,
+    /// Absolute managed client-protocol socket path (derived from `api_socket` when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_socket: Option<String>,
 }
 
 #[derive(Debug)]

@@ -307,6 +307,16 @@ fn client_status_json() -> ClientStatusJson {
     }
 }
 
+/// Session label used by `status`: the active named session, or the product
+/// default session name in `jacquard-product` builds (which has no explicit
+/// name in the internal env).
+fn status_session_label() -> Option<String> {
+    crate::session::active_name().or_else(|| {
+        crate::product::IS_JACQUARD_PRODUCT
+            .then(|| crate::product::DEFAULT_SESSION_NAME.to_string())
+    })
+}
+
 fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
     let mut status = match server {
         ServerRuntimeStatus::Running {
@@ -335,7 +345,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                 })
             }),
             socket: api::socket_path().display().to_string(),
-            session: crate::session::active_name(),
+            session: status_session_label(),
             restart_needed: restart_needed_bool(server),
             server_binary_stale: server_binary_stale_bool(server),
         },
@@ -348,7 +358,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             compatible: None,
             endpoint_compatible: None,
             socket: api::socket_path().display().to_string(),
-            session: crate::session::active_name(),
+            session: status_session_label(),
             restart_needed: Some(false),
             server_binary_stale: Some(false),
         },

@@ -268,7 +268,7 @@ fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<Se
     Ok(session_info(name))
 }
 
-fn stop_socket_with_timeout(
+pub(crate) fn stop_socket_with_timeout(
     socket_path: PathBuf,
     stopped_socket_paths: Vec<PathBuf>,
     timeout: Duration,
