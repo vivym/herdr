@@ -10441,6 +10441,13 @@
             "live_handoff": {
               "type": "boolean"
             },
+            "managed_session": {
+              "description": "Managed session name reported by a product managed server.\n\nA1 M6: `server status/start/stop --managed` compare this with the\nexplicit `--session` target and refuse to adopt/stop a server whose\nidentity cannot be verified (unknown/mismatched session => 78).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "ssh_agent_registration": {
               "default": false,
               "description": "Supports connection-scoped `server.ssh_agent.register` on the local JSON API.",

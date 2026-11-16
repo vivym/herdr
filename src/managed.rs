@@ -422,6 +422,30 @@ fn is_detached(status: &crate::api::RuntimeStatus) -> bool {
         .is_some_and(|capabilities| capabilities.detached_server_daemon)
 }
 
+/// A1 M6: a managed server must report the expected managed session identity.
+/// Unknown identity (legacy/upstream server, or a different managed session) is
+/// never adopted or stopped.
+fn managed_session_matches(target: &ManagedTarget, status: &crate::api::RuntimeStatus) -> bool {
+    status
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.managed_session.as_deref())
+        == Some(target.session.as_str())
+}
+
+fn refuse_foreign_server(target: &ManagedTarget, status: &crate::api::RuntimeStatus) {
+    let reported = status
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.managed_session.as_deref())
+        .unwrap_or("<unreported>");
+    eprintln!(
+        "managed server: server at {} reports managed session {reported:?}, expected {:?};          refusing to adopt/stop a server that is not the explicit managed target",
+        target.api_socket.display(),
+        target.session
+    );
+}
+
 fn status_json<'a>(
     target: &'a ManagedTarget,
     status: Option<&crate::api::RuntimeStatus>,
@@ -440,6 +464,12 @@ fn status_json<'a>(
 /// `server status --managed`: probe only the explicit managed socket.
 fn print_status(target: &ManagedTarget, json: bool) -> io::Result<i32> {
     let status = probe(&target.api_socket)?;
+    if let Some(status) = status.as_ref() {
+        if !managed_session_matches(target, status) {
+            refuse_foreign_server(target, status);
+            return Ok(EXIT_MISMATCH);
+        }
+    }
     let payload = status_json(target, status.as_ref());
     if json {
         println!("{}", serde_json::to_string(&payload).unwrap_or_default());
@@ -474,7 +504,7 @@ fn print_status(target: &ManagedTarget, json: bool) -> io::Result<i32> {
 /// `server --managed --detached`: start (or adopt) the detached managed server.
 fn start_detached(target: &ManagedTarget) -> io::Result<i32> {
     if let Some(status) = probe(&target.api_socket)? {
-        if is_detached(&status) {
+        if is_detached(&status) && managed_session_matches(target, &status) {
             // Already running and adoptable: report it, do not spawn a second server.
             println!(
                 "{}",
@@ -482,13 +512,17 @@ fn start_detached(target: &ManagedTarget) -> io::Result<i32> {
             );
             return Ok(0);
         }
-        eprintln!(
-            "managed server: an existing non-detached server is listening at {}",
-            target.api_socket.display()
-        );
-        eprintln!(
-            "managed server: stop it explicitly (never silently taking over a user/Plan D server)"
-        );
+        if !managed_session_matches(target, &status) {
+            refuse_foreign_server(target, &status);
+        } else {
+            eprintln!(
+                "managed server: an existing non-detached server is listening at {}",
+                target.api_socket.display()
+            );
+            eprintln!(
+                "managed server: stop it explicitly (never silently taking over a user/Plan D server)"
+            );
+        }
         return Ok(EXIT_MISMATCH);
     }
 
@@ -531,6 +565,10 @@ fn start_detached(target: &ManagedTarget) -> io::Result<i32> {
     let deadline = Instant::now() + SERVER_READY_TIMEOUT;
     loop {
         if let Some(status) = probe(&target.api_socket)? {
+            if !managed_session_matches(target, &status) {
+                refuse_foreign_server(target, &status);
+                return Ok(EXIT_MISMATCH);
+            }
             if !is_detached(&status) {
                 eprintln!(
                     "managed server: server at {} did not report detached_server_daemon=true",
@@ -559,12 +597,16 @@ fn start_detached(target: &ManagedTarget) -> io::Result<i32> {
 /// `server stop --managed`: stop only the explicit managed server.
 fn stop_server(target: &ManagedTarget, json: bool) -> io::Result<i32> {
     let status = probe(&target.api_socket)?;
-    if status.is_none() {
+    let Some(status) = status else {
         eprintln!(
             "managed server: no server is running at {}; refusing to fall back to any other socket",
             target.api_socket.display()
         );
         return Ok(1);
+    };
+    if !managed_session_matches(target, &status) {
+        refuse_foreign_server(target, &status);
+        return Ok(EXIT_MISMATCH);
     }
     let api_socket = target.api_socket.clone();
     let client_socket = target.client_socket.clone();
@@ -814,5 +856,57 @@ mod tests {
         ] {
             std::env::remove_var(name);
         }
+    }
+
+    // A1 M6: managed identity must be reported by the probed server and match
+    // the explicit target before status/adoption/stop. Unknown identity is
+    // never adopted or stopped.
+    fn runtime_status(managed_session: Option<&str>) -> crate::api::RuntimeStatus {
+        crate::api::RuntimeStatus {
+            version: Some("jacquard-term 0.9.5".into()),
+            protocol: Some(1),
+            capabilities: Some(crate::api::schema::ServerCapabilities {
+                live_handoff: true,
+                detached_server_daemon: true,
+                endpoint_protocol_generation: Some(1),
+                surface_interest: true,
+                health_check: true,
+                ssh_agent_registration: false,
+                managed_session: managed_session.map(str::to_owned),
+            }),
+        }
+    }
+
+    #[test]
+    fn managed_identity_matches_only_the_expected_session() {
+        let target = target(
+            cli_for("/tmp/herdr-term-api.sock"),
+            EnvArgs::default(),
+            &Default::default(),
+        );
+        assert!(managed_session_matches(
+            &target,
+            &runtime_status(Some(target.session.as_str()))
+        ));
+        assert!(!managed_session_matches(
+            &target,
+            &runtime_status(Some("other-session"))
+        ));
+        assert!(!managed_session_matches(&target, &runtime_status(None)));
+    }
+
+    #[test]
+    fn managed_status_identity_mismatch_is_exit_78() {
+        // The CLI-facing identity rule: a probed server whose reported session
+        // differs from --session must never be adopted/stopped; status returns
+        // EXIT_MISMATCH (78), matching the managed lifecycle contract.
+        let target = target(
+            cli_for("/tmp/herdr-term-api.sock"),
+            EnvArgs::default(),
+            &Default::default(),
+        );
+        let foreign = runtime_status(Some("other-session"));
+        assert!(!managed_session_matches(&target, &foreign));
+        assert_eq!(EXIT_MISMATCH, 78);
     }
 }

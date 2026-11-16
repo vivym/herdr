@@ -435,6 +435,7 @@ mod tests {
                 surface_interest: true,
                 health_check: true,
                 ssh_agent_registration: false,
+                managed_session: None,
             }),
         }
     }

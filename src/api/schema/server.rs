@@ -36,4 +36,11 @@ pub struct ServerCapabilities {
     /// Supports connection-scoped `server.ssh_agent.register` on the local JSON API.
     #[serde(default)]
     pub ssh_agent_registration: bool,
+    /// Managed session name reported by a product managed server.
+    ///
+    /// A1 M6: `server status/start/stop --managed` compare this with the
+    /// explicit `--session` target and refuse to adopt/stop a server whose
+    /// identity cannot be verified (unknown/mismatched session => 78).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_session: Option<String>,
 }
