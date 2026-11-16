@@ -22,6 +22,12 @@
 /// True only in `jacquard-product` builds.
 pub const IS_JACQUARD_PRODUCT: bool = cfg!(feature = "jacquard-product");
 
+/// Internal marker set by our own launcher/bridge when spawning a child that
+/// must keep the explicit `HERDR_*` socket/session environment. It has no
+/// privilege semantics; it only suppresses inherited-env sanitization in a
+/// child we started ourselves.
+pub const INTERNAL_CHILD_ENV_VAR: &str = "JACQUARD_TERM_INTERNAL_CHILD";
+
 /// User-visible product/command name used in help and version output.
 #[cfg(feature = "jacquard-product")]
 pub const NAME: &str = "jacquard-term";
@@ -90,6 +96,12 @@ pub const REMOTE_AUTO_INSTALL_ENABLED: bool = !IS_JACQUARD_PRODUCT;
 /// not select a server.
 #[cfg(feature = "jacquard-product")]
 pub fn sanitize_inherited_herdr_env() {
+    // Internal children started by our own launcher/bridge must keep the
+    // explicit HERDR_* socket/session env that the parent just set. The marker
+    // is only set by those internal spawns and grants no privilege.
+    if std::env::var_os(INTERNAL_CHILD_ENV_VAR).is_some() {
+        return;
+    }
     // `HERDR_SESSION` is intentionally not cleared: the product's own
     // `spawn_server_daemon` parent passes a named session to its child through
     // that variable. It only selects a session name inside the isolated
@@ -100,6 +112,9 @@ pub fn sanitize_inherited_herdr_env() {
         "HERDR_SOCKET_PATH",
         "HERDR_CLIENT_SOCKET_PATH",
         "HERDR_CONFIG_PATH",
+        // Upstream's local "install source" override has no meaning for the
+        // product's explicit owner-side `--remote-binary` flag.
+        "HERDR_REMOTE_BINARY",
         "HERDR_PANE_ID",
         "HERDR_TAB_ID",
         "HERDR_WORKSPACE_ID",

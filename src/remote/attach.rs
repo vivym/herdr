@@ -38,19 +38,113 @@ const WINDOWS_REMOTE_PATH_MARKER: &str = "herdr-remote-path:1:";
 const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "herdr-remote-install-dir:1:";
 const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "herdr-remote-install-result:1:";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
+
+/// Minimal allowlisted environment injected into explicit remote commands
+/// (A1 Phase 3, decision D5).
+///
+/// Only the session and owner socket/config paths are injected. `PATH`,
+/// `XDG_CONFIG_HOME`, `HOME` and every other variable are left untouched so
+/// pane shells keep the user's real environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RemoteExplicitEnv {
+    session: String,
+    api_socket: Option<String>,
+    client_socket: Option<String>,
+    config: Option<String>,
+}
+
+impl RemoteExplicitEnv {
+    fn new(explicit: &RemoteExplicitOptions, session: &str) -> Self {
+        Self {
+            session: session.to_string(),
+            api_socket: explicit.api_socket.clone(),
+            client_socket: explicit.client_socket.clone(),
+            config: explicit.config.clone(),
+        }
+    }
+
+    /// `env NAME=<quoted> ...` prefix for a POSIX remote command.
+    fn posix_prefix(&self) -> String {
+        // The owner-side bridge/server is started by us and must keep the
+        // explicit HERDR_* env instead of re-sanitizing it away.
+        let mut assignments = vec![format!(
+            "{}={}",
+            crate::product::INTERNAL_CHILD_ENV_VAR,
+            shell_quote("1")
+        )];
+        assignments.push(format!(
+            "{}={}",
+            crate::session::SESSION_ENV_VAR,
+            shell_quote(&self.session)
+        ));
+        if let Some(path) = &self.api_socket {
+            assignments.push(format!(
+                "{}={}",
+                crate::api::SOCKET_PATH_ENV_VAR,
+                shell_quote(path)
+            ));
+        }
+        if let Some(path) = &self.client_socket {
+            assignments.push(format!(
+                "{}={}",
+                crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+                shell_quote(path)
+            ));
+        }
+        if let Some(path) = &self.config {
+            assignments.push(format!(
+                "{}={}",
+                crate::config::CONFIG_PATH_ENV_VAR,
+                shell_quote(path)
+            ));
+        }
+        format!("env {}", assignments.join(" "))
+    }
+
+    fn wrap_posix(&self, command: String) -> String {
+        format!("{} {command}", self.posix_prefix())
+    }
+
+    /// All injected variable names, for tests/audit.
+    #[cfg(test)]
+    fn variable_names(&self) -> Vec<&'static str> {
+        let mut names = vec![crate::session::SESSION_ENV_VAR];
+        if self.api_socket.is_some() {
+            names.push(crate::api::SOCKET_PATH_ENV_VAR);
+        }
+        if self.client_socket.is_some() {
+            names.push(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
+        }
+        if self.config.is_some() {
+            names.push(crate::config::CONFIG_PATH_ENV_VAR);
+        }
+        names
+    }
+}
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+    // A1 Phase 3: product builds only attach with an explicit owner binary.
+    // Fail closed before any SSH command is sent, discovered or installed.
+    if crate::product::IS_JACQUARD_PRODUCT && remote.explicit.binary.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "jacquard-term remote attach requires an explicit --remote-binary owner path; implicit remote discovery, install and update are disabled in this build",
+        ));
+    }
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
     let local_socket = local_forward_socket_path(&remote.target, &session_name);
+    let explicit_env = (remote.explicit.has_any_path() || remote.explicit.binary.is_some())
+        .then(|| RemoteExplicitEnv::new(&remote.explicit, &session_name));
     let program = std::env::args()
         .next()
         .unwrap_or_else(|| "herdr".to_string());
-    let reattach_command = reattach_command(
+    let reattach_command = reattach_command_with_explicit(
         &program,
         &remote.target,
         &session_name,
         remote.keybindings,
         remote.live_handoff,
+        &remote.explicit,
     );
     let manage_ssh_config = crate::config::Config::load()
         .config
@@ -64,14 +158,26 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         manage_ssh_config,
         session_name.clone(),
     );
-    let prepared_remote =
-        prepare_remote_herdr(&remote_ssh, remote.live_handoff, require_surface_interest)?;
+    let prepared_remote = match (remote.explicit.binary.as_deref(), explicit_env.as_ref()) {
+        (Some(binary), Some(env)) => {
+            prepare_explicit_remote_herdr(&remote_ssh, binary, env.clone())?
+        }
+        (Some(_), None) => unreachable!("explicit binary always builds an env"),
+        (None, env) => prepare_remote_herdr(
+            &remote_ssh,
+            remote.live_handoff,
+            require_surface_interest,
+            remote.explicit.no_install,
+            env.cloned(),
+        )?,
+    };
     ensure_remote_server_ready(
         &remote_ssh,
         &prepared_remote.remote_herdr,
         prepared_remote.stop_after_install_approved,
         remote.live_handoff,
         require_surface_interest,
+        remote.explicit.no_restart,
     )?;
 
     let _bridge = SshStdioBridge::start(
@@ -163,7 +269,7 @@ impl SavedSshSetup {
         for candidate in &self.candidates {
             let output = self.ssh.shell_output(
                 &candidate.platform,
-                &candidate.executable.command(&["session", "list", "--json"]),
+                &candidate.command(&["session", "list", "--json"]),
             )?;
             if output.status.code() == Some(255) {
                 return Err(command_failed("remote SSH connection failed", &output));
@@ -204,21 +310,19 @@ impl SavedSshSetup {
             candidates,
         } = self;
         let prepared =
-            prepare_discovered_remote_herdr(&ssh, remote_herdr, &candidates, false, true)?;
+            prepare_discovered_remote_herdr(&ssh, remote_herdr, &candidates, false, true, false)?;
         ensure_remote_server_ready(
             &ssh,
             &prepared.remote_herdr,
             prepared.stop_after_install_approved,
             false,
             true,
+            false,
         )?;
 
         // The bridge already owns daemon startup. EOF closes only this temporary attachment,
         // leaving the named server running even when no local TUI is open yet.
-        let command = prepared
-            .remote_herdr
-            .executable
-            .saved_bridge_command(session_name);
+        let command = prepared.remote_herdr.saved_bridge_command(session_name);
         let output = ssh.shell_output(&prepared.remote_herdr.platform, &command)?;
         if !output.status.success() {
             return Err(command_failed("remote server startup failed", &output));
@@ -361,6 +465,7 @@ impl RemoteExecutable {
         }
     }
 
+    #[cfg(test)]
     fn session_command(&self, session_name: &str, args: &[&str]) -> String {
         self.command(&Self::session_args(session_name, args))
     }
@@ -384,6 +489,7 @@ impl RemoteExecutable {
         }
     }
 
+    #[cfg(test)]
     fn status_client_command(&self) -> String {
         match self {
             Self::PosixShellPath(path) => format!(
@@ -394,10 +500,12 @@ impl RemoteExecutable {
         }
     }
 
+    #[cfg(test)]
     fn bridge_command(&self, session_name: &str) -> String {
         self.bridge_command_with_idle_timeout(session_name, false)
     }
 
+    #[cfg(test)]
     fn bridge_command_with_idle_timeout(&self, session_name: &str, idle_timeout: bool) -> String {
         let command = if idle_timeout {
             &["remote-client-bridge", "--idle-timeout-v1"][..]
@@ -415,6 +523,7 @@ impl RemoteExecutable {
         }
     }
 
+    #[cfg(test)]
     fn saved_bridge_command(&self, session_name: &str) -> String {
         let args = Self::session_args(session_name, &["remote-client-bridge"]);
         match self {
@@ -425,6 +534,7 @@ impl RemoteExecutable {
         }
     }
 
+    #[cfg(test)]
     fn live_handoff_command(&self, session_name: &str, protocol: u32, version: &str) -> String {
         let protocol = protocol.to_string();
         match self {
@@ -458,6 +568,11 @@ pub(super) struct RemoteHerdr {
     resolved_executable: Option<String>,
     platform: RemotePlatform,
     bridge_idle_timeout: bool,
+    /// Explicit A1 Phase 3 environment injected into every remote command.
+    env: Option<RemoteExplicitEnv>,
+    /// True when the binary path came from `--remote-binary` (no discovery,
+    /// no install/update prompts, no PATH fallback).
+    explicit_binary: bool,
 }
 
 impl RemoteHerdr {
@@ -487,6 +602,111 @@ impl RemoteHerdr {
             resolved_executable: None,
             platform,
             bridge_idle_timeout: false,
+            env: None,
+            explicit_binary: false,
+        }
+    }
+
+    /// Owner-side explicit binary (A1 Phase 3): the path must already exist on
+    /// the owner host; nothing is copied, downloaded or installed.
+    fn with_owner_binary(platform: RemotePlatform, path: &str, env: RemoteExplicitEnv) -> Self {
+        let mut remote = Self::for_platform(platform);
+        remote.executable = RemoteExecutable::PosixShellPath(shell_quote(path));
+        remote.resolved_executable = Some(path.to_owned());
+        remote.env = Some(env);
+        remote.explicit_binary = true;
+        remote
+    }
+
+    fn with_env(mut self, env: RemoteExplicitEnv) -> Self {
+        self.env = Some(env);
+        self
+    }
+
+    fn command(&self, args: &[&str]) -> String {
+        match &self.executable {
+            RemoteExecutable::PosixShellPath(_) => match &self.env {
+                Some(env) => env.wrap_posix(self.executable.command(args)),
+                None => self.executable.command(args),
+            },
+            RemoteExecutable::WindowsPath(_) => self.executable.command(args),
+        }
+    }
+
+    fn session_command(&self, session_name: &str, args: &[&str]) -> String {
+        let args = RemoteExecutable::session_args(session_name, args);
+        self.command(&args)
+    }
+
+    fn bridge_command(&self, session_name: &str) -> String {
+        self.bridge_command_with_idle_timeout(session_name, false)
+    }
+
+    fn bridge_command_with_idle_timeout(&self, session_name: &str, idle_timeout: bool) -> String {
+        let command = if idle_timeout {
+            &["remote-client-bridge", "--idle-timeout-v1"][..]
+        } else {
+            &["remote-client-bridge"][..]
+        };
+        let args = RemoteExecutable::session_args(session_name, command);
+        match &self.executable {
+            RemoteExecutable::PosixShellPath(_) => {
+                posix_remote_output_command(&format!("exec {}", self.command(&args)))
+            }
+            RemoteExecutable::WindowsPath(path) => {
+                windows_powershell_streaming_application_command(path, &args)
+            }
+        }
+    }
+
+    fn saved_bridge_command(&self, session_name: &str) -> String {
+        let args = RemoteExecutable::session_args(session_name, &["remote-client-bridge"]);
+        match &self.executable {
+            RemoteExecutable::PosixShellPath(_) => {
+                format!("exec {} </dev/null", self.command(&args))
+            }
+            RemoteExecutable::WindowsPath(path) => {
+                windows_powershell_streaming_application_command(path, &args)
+            }
+        }
+    }
+
+    fn status_client_command(&self) -> String {
+        match &self.executable {
+            RemoteExecutable::PosixShellPath(_) => {
+                format!(
+                    "test -x {} && {}",
+                    self.executable.display(),
+                    self.command(&["status", "client", "--json"])
+                )
+            }
+            RemoteExecutable::WindowsPath(_) => self.command(&["status", "client", "--json"]),
+        }
+    }
+
+    fn live_handoff_command(&self, session_name: &str, protocol: u32, version: &str) -> String {
+        let protocol = protocol.to_string();
+        match &self.executable {
+            RemoteExecutable::PosixShellPath(_) => format!(
+                "{} --import-exe {} --expected-protocol {} --expected-version {}",
+                self.session_command(session_name, &["server", "live-handoff"]),
+                shell_quote(self.executable.display()),
+                shell_quote(&protocol),
+                shell_quote(version),
+            ),
+            RemoteExecutable::WindowsPath(path) => self.session_command(
+                session_name,
+                &[
+                    "server",
+                    "live-handoff",
+                    "--import-exe",
+                    path,
+                    "--expected-protocol",
+                    &protocol,
+                    "--expected-version",
+                    version,
+                ],
+            ),
         }
     }
 
@@ -680,6 +900,17 @@ struct RemoteReleaseAsset {
 pub(super) struct PreparedRemoteHerdr {
     pub(super) remote_herdr: RemoteHerdr,
     stop_after_install_approved: bool,
+}
+
+impl PreparedRemoteHerdr {
+    /// Attach the explicit owner-side remote environment (A1 Phase 3) to the
+    /// prepared binary so every derived remote command injects it.
+    fn with_remote_env(mut self, env: Option<RemoteExplicitEnv>) -> Self {
+        if let Some(env) = env {
+            self.remote_herdr = self.remote_herdr.with_env(env);
+        }
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -1309,21 +1540,106 @@ fn ensure_remote_install_allowed(override_binary: Option<&Path>) -> io::Result<(
     ))
 }
 
+/// Prepare an explicit owner-side binary (A1 Phase 3, `--remote-binary`).
+///
+/// This path never discovers, copies, downloads or installs a binary: it uses
+/// the owner absolute path as-is, verifies `test -x`, verifies the reported
+/// version, and always injects the allowlisted socket/session environment.
+fn prepare_explicit_remote_herdr(
+    ssh: &RemoteSsh,
+    owner_binary: &str,
+    env: RemoteExplicitEnv,
+) -> io::Result<PreparedRemoteHerdr> {
+    let platform = detect_remote_platform(ssh)?.into_setup_platform();
+    if platform.is_windows() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "explicit --remote-binary attach is only supported for Linux/posix owner hosts in this build",
+        ));
+    }
+    let remote_herdr = RemoteHerdr::with_owner_binary(platform, owner_binary, env);
+
+    let exists = ssh.shell_output(
+        &remote_herdr.platform,
+        &remote_herdr.executable.exists_command(),
+    )?;
+    if !exists.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "explicit remote binary {owner_binary} is not executable on the owner host; no PATH fallback and no install was attempted"
+            ),
+        ));
+    }
+
+    let version_output = ssh.shell_output(
+        &remote_herdr.platform,
+        &remote_herdr.command(&["--version"]),
+    )?;
+    if !version_output.status.success() {
+        return Err(command_failed(
+            "explicit remote binary --version probe failed",
+            &version_output,
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&version_output.stdout);
+    let reported = parse_remote_binary_version(&stdout).ok_or_else(|| {
+        io::Error::other(format!(
+            "explicit remote binary {owner_binary} did not report a recognizable {} version (stdout: {})",
+            crate::product::NAME,
+            stdout.trim()
+        ))
+    })?;
+    let expected = crate::build_info::version();
+    if reported != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "explicit remote binary {owner_binary} reports version {reported}, expected {expected}; install the matching bundled {} on the owner host",
+                crate::product::NAME
+            ),
+        ));
+    }
+
+    Ok(PreparedRemoteHerdr {
+        remote_herdr,
+        stop_after_install_approved: false,
+    })
+}
+
+/// Parse `<product> <version>` from a remote `--version` probe.
+fn parse_remote_binary_version(stdout: &str) -> Option<String> {
+    let line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let mut parts = line.split_whitespace();
+    let program = parts.next()?;
+    if program != "jacquard-term" && program != "herdr" {
+        return None;
+    }
+    parts.next().map(str::to_string)
+}
+
 pub(super) fn prepare_remote_herdr(
     ssh: &RemoteSsh,
     live_handoff_enabled: bool,
     require_surface_interest: bool,
+    no_install: bool,
+    env: Option<RemoteExplicitEnv>,
 ) -> io::Result<PreparedRemoteHerdr> {
     let platform = detect_remote_platform(ssh)?.into_setup_platform();
     let remote_herdr = RemoteHerdr::for_platform(platform);
     let candidates = remote_binary_candidates(ssh, &remote_herdr)?;
-    prepare_discovered_remote_herdr(
+    let prepared = prepare_discovered_remote_herdr(
         ssh,
         remote_herdr,
         &candidates,
         live_handoff_enabled,
         require_surface_interest,
-    )
+        no_install,
+    )?;
+    Ok(prepared.with_remote_env(env))
 }
 
 fn prepare_discovered_remote_herdr(
@@ -1332,6 +1648,7 @@ fn prepare_discovered_remote_herdr(
     candidates: &[RemoteHerdr],
     live_handoff_enabled: bool,
     require_surface_interest: bool,
+    no_install: bool,
 ) -> io::Result<PreparedRemoteHerdr> {
     if remote_herdr.platform.is_windows() {
         return prepare_windows_remote_herdr(
@@ -1340,6 +1657,7 @@ fn prepare_discovered_remote_herdr(
             candidates,
             live_handoff_enabled,
             require_surface_interest,
+            no_install,
         );
     }
     let override_binary = remote_binary_override_path()?;
@@ -1365,6 +1683,17 @@ fn prepare_discovered_remote_herdr(
                 stop_after_install_approved: false,
             });
         }
+    }
+
+    if no_install {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "no compatible remote {} binary found on {} and --remote-no-install was set; install the bundled binary explicitly or pass --remote-binary",
+                crate::product::NAME,
+                ssh.target()
+            ),
+        ));
     }
 
     ensure_remote_install_allowed(override_binary.as_deref())?;
@@ -1436,6 +1765,7 @@ fn prepare_windows_remote_herdr(
     candidates: &[RemoteHerdr],
     live_handoff_enabled: bool,
     require_surface_interest: bool,
+    no_install: bool,
 ) -> io::Result<PreparedRemoteHerdr> {
     let override_package = remote_binary_override_path()?;
     let custom_package = override_package.is_some();
@@ -1452,6 +1782,17 @@ fn prepare_windows_remote_herdr(
                 });
             }
         }
+    }
+
+    if no_install {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "no compatible remote {} binary found on {} and --remote-no-install was set; install the bundled binary explicitly",
+                crate::product::NAME,
+                ssh.target()
+            ),
+        ));
     }
 
     ensure_remote_install_allowed(override_package.as_deref())?;
@@ -1806,7 +2147,7 @@ fn remote_client_status(
     ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<Option<RemoteClientStatusJson>> {
-    let command = remote_herdr.executable.status_client_command();
+    let command = remote_herdr.status_client_command();
     let output = ssh.shell_output(&remote_herdr.platform, &command)?;
     if !output.status.success() {
         if output.status.code() == Some(255) {
@@ -1976,6 +2317,7 @@ fn ensure_remote_server_ready(
     stop_after_install_approved: bool,
     live_handoff_enabled: bool,
     require_surface_interest: bool,
+    no_restart: bool,
 ) -> io::Result<()> {
     let status = remote_server_status(ssh, remote_herdr, require_surface_interest)?;
     let RemoteServerStatus::Running {
@@ -1999,6 +2341,18 @@ fn ensure_remote_server_ready(
     ) else {
         return Ok(());
     };
+
+    if no_restart {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "remote {} server on {} needs a restart ({}), but --remote-no-restart was set; stop/start the managed server explicitly or rerun without --remote-no-restart",
+                crate::product::NAME,
+                ssh.destination(),
+                reason.describe()
+            ),
+        ));
+    }
 
     if live_handoff_enabled && live_handoff {
         match live_handoff_remote_server(ssh, remote_herdr) {
@@ -2141,9 +2495,7 @@ fn remote_server_status(
     remote_herdr: &RemoteHerdr,
     require_surface_interest: bool,
 ) -> io::Result<RemoteServerStatus> {
-    let command = remote_herdr
-        .executable
-        .session_command(&ssh.session_name, &["status", "server", "--json"]);
+    let command = remote_herdr.session_command(&ssh.session_name, &["status", "server", "--json"]);
     let output = ssh.shell_output(&remote_herdr.platform, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server status failed", &output));
@@ -2385,10 +2737,7 @@ fn live_handoff_remote_server(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io
         .version
         .filter(|version| !version.is_empty())
         .ok_or_else(|| io::Error::other("prepared remote herdr did not report its version"))?;
-    let command =
-        remote_herdr
-            .executable
-            .live_handoff_command(&ssh.session_name, protocol, &version);
+    let command = remote_herdr.live_handoff_command(&ssh.session_name, protocol, &version);
     let output = ssh.shell_output(&remote_herdr.platform, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server live handoff failed", &output));
@@ -2402,9 +2751,7 @@ fn live_handoff_remote_server(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io
 }
 
 fn stop_remote_server(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<()> {
-    let command = remote_herdr
-        .executable
-        .session_command(&ssh.session_name, &["server", "stop"]);
+    let command = remote_herdr.session_command(&ssh.session_name, &["server", "stop"]);
     let output = ssh.shell_output(&remote_herdr.platform, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server stop failed", &output));
@@ -2740,19 +3087,38 @@ pub(super) fn remote_api_bridge_command(
     }
     match &remote_herdr.executable {
         RemoteExecutable::PosixShellPath(_) => {
-            posix_remote_output_command(&format!("exec {}", remote_herdr.executable.command(&args)))
+            posix_remote_output_command(&format!("exec {}", remote_herdr.command(&args)))
         }
         RemoteExecutable::WindowsPath(path) => {
             windows_powershell_streaming_application_command(path, &args)
         }
     }
 }
+#[cfg(test)]
 fn reattach_command(
     program: &str,
     target: &str,
     session_name: &str,
     keybindings: RemoteKeybindings,
     live_handoff: bool,
+) -> String {
+    reattach_command_with_explicit(
+        program,
+        target,
+        session_name,
+        keybindings,
+        live_handoff,
+        &RemoteExplicitOptions::default(),
+    )
+}
+
+fn reattach_command_with_explicit(
+    program: &str,
+    target: &str,
+    session_name: &str,
+    keybindings: RemoteKeybindings,
+    live_handoff: bool,
+    explicit: &RemoteExplicitOptions,
 ) -> String {
     let program = crate::platform::remote_reattach_program(program);
     let target = crate::platform::remote_reattach_argument(target);
@@ -2767,6 +3133,25 @@ fn reattach_command(
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
         command.push_str(&crate::platform::remote_reattach_argument(session_name));
+    }
+    for (flag, value) in [
+        ("--remote-binary", explicit.binary.as_deref()),
+        ("--remote-socket", explicit.api_socket.as_deref()),
+        ("--remote-client-socket", explicit.client_socket.as_deref()),
+        ("--remote-config", explicit.config.as_deref()),
+    ] {
+        if let Some(value) = value {
+            command.push(' ');
+            command.push_str(flag);
+            command.push(' ');
+            command.push_str(&crate::platform::remote_reattach_argument(value));
+        }
+    }
+    if explicit.no_install {
+        command.push_str(" --remote-no-install");
+    }
+    if explicit.no_restart {
+        command.push_str(" --remote-no-restart");
     }
     command
 }
@@ -2801,11 +3186,9 @@ impl SshStdioBridge {
         Self::start_command(
             target,
             if noninteractive && remote_herdr.bridge_idle_timeout {
-                remote_herdr
-                    .executable
-                    .bridge_command_with_idle_timeout(&session_name, true)
+                remote_herdr.bridge_command_with_idle_timeout(&session_name, true)
             } else {
-                remote_herdr.executable.bridge_command(&session_name)
+                remote_herdr.bridge_command(&session_name)
             },
             local_socket,
             ssh_options,
@@ -3430,6 +3813,7 @@ fn configure_remote_client_environment(
         .env(REMOTE_PREFERENCES_ENV_VAR, preference_identity)
         .env(REATTACH_COMMAND_ENV_VAR, reattach_command)
         .env(REMOTE_KEYBINDINGS_ENV_VAR, keybindings.as_str())
+        .env(crate::product::INTERNAL_CHILD_ENV_VAR, "1")
         .env_remove(crate::api::SOCKET_PATH_ENV_VAR);
     Ok(())
 }
@@ -5753,5 +6137,166 @@ function Get-Process {
         assert!(error.to_string().contains("auto-install is disabled"));
         ensure_remote_install_allowed(Some(std::path::Path::new("/tmp/jacquard-term")))
             .expect("an explicit remote binary override is honored");
+    }
+
+    fn explicit_remote_env(
+        api: Option<&str>,
+        client: Option<&str>,
+        config: Option<&str>,
+    ) -> RemoteExplicitEnv {
+        RemoteExplicitEnv::new(
+            &RemoteExplicitOptions {
+                api_socket: api.map(str::to_string),
+                client_socket: client.map(str::to_string),
+                config: config.map(str::to_string),
+                ..RemoteExplicitOptions::default()
+            },
+            "jacquard",
+        )
+    }
+
+    fn explicit_remote_herdr(env: RemoteExplicitEnv) -> RemoteHerdr {
+        RemoteHerdr::with_owner_binary(
+            RemotePlatform {
+                os: "linux",
+                arch: "x86_64",
+            },
+            "/opt/jacquard/libexec/jacquard-term",
+            env,
+        )
+    }
+
+    #[test]
+    fn explicit_posix_commands_inject_only_the_allowlisted_env() {
+        let env = explicit_remote_env(
+            Some("/run/user/1000/jacquard-term/api.sock"),
+            Some("/run/user/1000/jacquard-term/client.sock"),
+            Some("/run/user/1000/jacquard-term/config.toml"),
+        );
+        assert_eq!(
+            env.variable_names(),
+            vec![
+                crate::session::SESSION_ENV_VAR,
+                crate::api::SOCKET_PATH_ENV_VAR,
+                crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+                crate::config::CONFIG_PATH_ENV_VAR,
+            ]
+        );
+
+        let herdr = explicit_remote_herdr(env);
+        let status = herdr.session_command("jacquard", &["status", "server", "--json"]);
+        let bridge = herdr.bridge_command("jacquard");
+        let handoff = herdr.live_handoff_command("jacquard", 19, "0.9.5");
+
+        for (label, command) in [
+            ("status", status),
+            ("bridge", bridge),
+            ("live handoff", handoff),
+        ] {
+            assert!(
+                command.contains("env JACQUARD_TERM_INTERNAL_CHILD=1"),
+                "{label} lacks the internal-child marker: {command}"
+            );
+            assert!(
+                command.contains("HERDR_SESSION=jacquard"),
+                "{label} lacks session env: {command}"
+            );
+            assert!(
+                command.contains("HERDR_SOCKET_PATH=/run/user/1000/jacquard-term/api.sock"),
+                "{label} lacks API socket env: {command}"
+            );
+            assert!(
+                command
+                    .contains("HERDR_CLIENT_SOCKET_PATH=/run/user/1000/jacquard-term/client.sock"),
+                "{label} lacks client socket env: {command}"
+            );
+            assert!(
+                command.contains("HERDR_CONFIG_PATH=/run/user/1000/jacquard-term/config.toml"),
+                "{label} lacks config env: {command}"
+            );
+            assert!(
+                command.contains("/opt/jacquard/libexec/jacquard-term"),
+                "{label} lacks explicit owner binary: {command}"
+            );
+            for forbidden in [
+                "XDG_CONFIG_HOME=",
+                " PATH=/",
+                " HOME=/",
+                "scp ",
+                "curl ",
+                "wget ",
+            ] {
+                assert!(
+                    !command.contains(forbidden),
+                    "{label} must not inject/run {forbidden:?}: {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_remote_env_shell_quotes_paths_with_spaces() {
+        let env = explicit_remote_env(Some("/run/user/1000/my sockets/api.sock"), None, None);
+        let herdr = explicit_remote_herdr(env);
+        let command = herdr.session_command("jacquard", &["status", "server", "--json"]);
+        assert!(
+            command.contains("HERDR_SOCKET_PATH='/run/user/1000/my sockets/api.sock'"),
+            "path must be shell-quoted: {command}"
+        );
+    }
+
+    #[test]
+    fn remote_binary_version_parse_accepts_product_and_upstream_binaries() {
+        assert_eq!(
+            parse_remote_binary_version("jacquard-term 0.9.5\n").as_deref(),
+            Some("0.9.5")
+        );
+        assert_eq!(
+            parse_remote_binary_version("\nherdr 0.9.5\n").as_deref(),
+            Some("0.9.5")
+        );
+        assert_eq!(parse_remote_binary_version("unexpected output"), None);
+        assert_eq!(parse_remote_binary_version("jacquard-term"), None);
+    }
+
+    #[test]
+    fn reattach_command_carries_explicit_owner_options() {
+        let explicit = RemoteExplicitOptions {
+            binary: Some("/opt/jacquard/libexec/jacquard-term".into()),
+            api_socket: Some("/run/user/1000/jacquard-term/api.sock".into()),
+            client_socket: Some("/run/user/1000/jacquard-term/client.sock".into()),
+            config: Some("/run/user/1000/jacquard-term/config.toml".into()),
+            no_install: true,
+            no_restart: true,
+        };
+        let command = reattach_command_with_explicit(
+            "herdr",
+            "owner@login01",
+            "jacquard",
+            RemoteKeybindings::Local,
+            false,
+            &explicit,
+        );
+        assert!(
+            command.contains("--remote-binary /opt/jacquard/libexec/jacquard-term"),
+            "{command}"
+        );
+        assert!(command.contains("--remote-socket /run/user/1000/jacquard-term/api.sock"));
+        assert!(command.contains("--remote-client-socket /run/user/1000/jacquard-term/client.sock"));
+        assert!(command.contains("--remote-config /run/user/1000/jacquard-term/config.toml"));
+        assert!(command.contains("--remote-no-install"));
+        assert!(command.contains("--remote-no-restart"));
+    }
+
+    #[test]
+    fn reattach_command_keeps_upstream_shape_without_explicit_options() {
+        let command = reattach_command(
+            "herdr",
+            "owner@login01",
+            crate::session::DEFAULT_SESSION_NAME,
+            RemoteKeybindings::Local,
+            false,
+        );
+        assert_eq!(command, "herdr --remote owner@login01");
     }
 }

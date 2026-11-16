@@ -14,6 +14,22 @@ pub(super) fn command() -> Command {
         .arg(option("session", "NAME").help("Use or create a named persistent session"))
         .arg(option("machine", "LABEL-OR-ID").help("Run an API command on a saved SSH machine"))
         .arg(option("remote", "TARGET").help("Attach through SSH to a remote Herdr server"))
+        .arg(option("remote-binary", "PATH").help(
+            "Owner-side absolute path of the bundled binary (jacquard-product remote attach)",
+        ))
+        .arg(
+            option("remote-socket", "PATH").help("Owner-side absolute path of the JSON API socket"),
+        )
+        .arg(
+            option("remote-client-socket", "PATH")
+                .help("Owner-side absolute path of the client protocol socket"),
+        )
+        .arg(
+            option("remote-config", "PATH")
+                .help("Owner-side absolute path of an explicit config.toml"),
+        )
+        .arg(flag("remote-no-install").help("Never install or update the remote binary"))
+        .arg(flag("remote-no-restart").help("Never stop or restart the remote server"))
         .arg(
             option("remote-keybindings", "MODE")
                 .value_parser(["local", "server"])

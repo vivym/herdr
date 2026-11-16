@@ -558,6 +558,14 @@ fn print_product_help() {
     println!("  {name} workspace <subcommand>    Workspace helpers over the socket API");
     println!("  {name} worktree <subcommand>     Git worktree helpers over the socket API");
     println!();
+    println!("Remote attach (A1):");
+    println!("  --remote <ssh-target>");
+    println!("  --remote-binary <owner-absolute-path>   explicit owner bundled binary (required)");
+    println!("  --remote-socket <owner-absolute-path>   owner JSON API socket");
+    println!("  --remote-client-socket <owner-absolute-path>");
+    println!("  --remote-config <owner-absolute-path>   optional explicit owner config");
+    println!("  --remote-no-install / --remote-no-restart");
+    println!();
     println!("Options:");
     println!(
         "  --session <name>    Use or create a named persistent session (default: {})",

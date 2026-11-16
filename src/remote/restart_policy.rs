@@ -6,6 +6,18 @@ pub(super) enum RemoteServerRestartReason {
     DaemonDetach,
 }
 
+impl RemoteServerRestartReason {
+    /// Human-readable reason used by --remote-no-restart and restart prompts.
+    pub(super) fn describe(self) -> &'static str {
+        match self {
+            Self::EndpointProtocol => "endpoint protocol generation mismatch",
+            Self::SurfaceInterest => "server lacks surface-interest support",
+            Self::HealthCheck => "server lacks endpoint health-check support",
+            Self::DaemonDetach => "server is not a detached daemon",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RemoteInstallRunningServerPlan {
     KeepRunning,
@@ -64,6 +76,31 @@ pub(super) fn remote_install_running_server_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_reasons_have_actionable_descriptions() {
+        for (reason, expected) in [
+            (
+                RemoteServerRestartReason::EndpointProtocol,
+                "endpoint protocol generation mismatch",
+            ),
+            (
+                RemoteServerRestartReason::SurfaceInterest,
+                "surface-interest",
+            ),
+            (RemoteServerRestartReason::HealthCheck, "health-check"),
+            (
+                RemoteServerRestartReason::DaemonDetach,
+                "not a detached daemon",
+            ),
+        ] {
+            assert!(
+                reason.describe().contains(expected),
+                "{reason:?}: {}",
+                reason.describe()
+            );
+        }
+    }
 
     #[test]
     fn pre_floor_server_requires_update() {
