@@ -20,6 +20,13 @@ include = [
     "Cargo.toml",
 ]
 
+[features]
+default = []
+# Jacquard Term product identity (A1 fork patch): app dir `jacquard-term`,
+# product name/default session, built-in agent manifests, and no network
+# self-update/external manifest updates. Upstream builds leave it disabled.
+jacquard-product = []
+
 [workspace]
 members = ["crates/ghostty-vt"]
 default-members = [".", "crates/ghostty-vt"]

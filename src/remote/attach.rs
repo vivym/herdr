@@ -1293,6 +1293,22 @@ impl InstallSource {
     }
 }
 
+/// Reject implicit remote auto-install/update in `jacquard-product` builds.
+///
+/// A1 Phase 1 closes network and external installation paths; the product ships
+/// its own bundled binary and explicit remote-binary support lands in A1
+/// Phase 3. Product builds may still attach to a host that already runs a
+/// matching binary, and an explicit remote binary override is honored.
+fn ensure_remote_install_allowed(override_binary: Option<&Path>) -> io::Result<()> {
+    if crate::product::REMOTE_AUTO_INSTALL_ENABLED || override_binary.is_some() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "remote auto-install is disabled in jacquard-term; provide an explicit remote binary (A1 remote mode) or install the matching jacquard-term on the remote host",
+    ))
+}
+
 pub(super) fn prepare_remote_herdr(
     ssh: &RemoteSsh,
     live_handoff_enabled: bool,
@@ -1350,6 +1366,8 @@ fn prepare_discovered_remote_herdr(
             });
         }
     }
+
+    ensure_remote_install_allowed(override_binary.as_deref())?;
 
     let mut stop_after_install_approved = false;
     if let Some(status_probe_herdr) = candidates.first().or_else(|| {
@@ -1435,6 +1453,8 @@ fn prepare_windows_remote_herdr(
             }
         }
     }
+
+    ensure_remote_install_allowed(override_package.as_deref())?;
 
     let stop_after_install_approved = if let Some(candidate) = candidates.first() {
         confirm_remote_install_with_running_server(
@@ -1889,6 +1909,7 @@ fn resolve_install_source(
     if let Some(path) = override_binary {
         return Ok(InstallSource::persistent(path));
     }
+    ensure_remote_install_allowed(None)?;
 
     if *platform == RemotePlatform::local() {
         let path = std::env::current_exe()?;
@@ -5718,5 +5739,19 @@ function Get-Process {
         InstallSource::temporary(path, dir.clone()).cleanup();
 
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn product_build_rejects_implicit_remote_auto_install() {
+        if crate::product::REMOTE_AUTO_INSTALL_ENABLED {
+            ensure_remote_install_allowed(None).expect("upstream builds allow remote auto-install");
+            return;
+        }
+        let error = ensure_remote_install_allowed(None)
+            .expect_err("product builds must reject implicit remote auto-install");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("auto-install is disabled"));
+        ensure_remote_install_allowed(Some(std::path::Path::new("/tmp/jacquard-term")))
+            .expect("an explicit remote binary override is honored");
     }
 }

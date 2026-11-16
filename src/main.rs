@@ -41,6 +41,7 @@ mod plugin_command;
 mod plugin_installations;
 mod plugin_paths;
 mod popup_size;
+mod product;
 mod product_announcements;
 mod protocol;
 mod pty;
@@ -508,12 +509,82 @@ fn finish_cli(outcome: io::Result<cli::CommandOutcome>) -> io::Result<()> {
     }
 }
 
+/// Usage hint for CLI parse errors; uses the product command name in
+/// `jacquard-product` builds.
+fn help_usage_hint() -> String {
+    format!("run '{} --help' for usage", product::NAME)
+}
+
+/// Root help screen for `jacquard-product` builds.
+///
+/// Product builds keep the upstream command surface (including the plugin
+/// marketplace) but print the Jacquard Term identity and must not advertise
+/// network self-update, which is disabled (A1 D9/§6.5).
+fn print_product_help() {
+    let name = product::NAME;
+    println!("{name} — {}", product::TAGLINE);
+    println!();
+    println!("Usage: {name} [options]");
+    println!("       {name} --session <name> [options]");
+    println!("       {name} --machine <label-or-id> <command>");
+    println!("       {name} --remote <ssh-target> [--session <name>]");
+    println!("       {name} session attach <name>");
+    println!("       {name} completion <shell>");
+    println!("       {name} status [server|client]");
+    println!("       {name} server stop");
+    println!("       {name} server reload-config");
+    println!("       {name} <command> <subcommand> ...");
+    println!();
+    println!("Command groups:");
+    println!("  {name} agent <subcommand>        Agent/terminal helpers over the socket API");
+    println!(
+        "  {name} api <subcommand>          Inspect socket API metadata and live runtime state"
+    );
+    println!("  {name} config <subcommand>       Manage config.toml");
+    println!("  {name} integration <subcommand>  Manage built-in agent integrations");
+    println!("  {name} machine <subcommand>      Manage saved SSH machines");
+    println!("  {name} notification <subcommand> Manage in-app notifications");
+    println!("  {name} pane <subcommand>         Pane control helpers over the socket API");
+    println!(
+        "  {name} plugin <subcommand>       Manage the plugin marketplace and installed plugins"
+    );
+    println!("  {name} session <subcommand>      Manage named persistent sessions");
+    println!("  {name} tab <subcommand>          Tab helpers over the socket API");
+    println!("  {name} terminal <subcommand>     Terminal observation/control helpers");
+    println!("  {name} workspace <subcommand>    Workspace helpers over the socket API");
+    println!("  {name} worktree <subcommand>     Git worktree helpers over the socket API");
+    println!();
+    println!("Options:");
+    println!(
+        "  --session <name>    Use or create a named persistent session (default: {})",
+        product::DEFAULT_SESSION_NAME
+    );
+    println!("  --machine <label-or-id>  Run an API command on a saved SSH machine");
+    println!("  --remote <target>   Attach through SSH to a remote {name} server");
+    println!("  --remote-keybindings <local|server>");
+    println!("                      Keybindings for --remote app attach (default: local)");
+    println!("  --handoff           Opt into live handoff for remote attach");
+    println!("  --default-config    Print default configuration and exit");
+    println!("  --skill             Print the bundled agent skill file and exit");
+    println!("  --version, -V       Print version and exit");
+    println!("  --help, -h          Show this help");
+    println!();
+    println!("Config: {}", config::config_path().display());
+    println!("Logs:   {}", logging::help_log_paths_summary());
+    println!("Env:    HERDR_CONFIG_PATH overrides config file path");
+    println!();
+    println!(
+        "Updates: disabled; this build ships inside the Jacquard desktop client release bundle."
+    );
+    println!("Plugins: the plugin marketplace and plugin API remain enabled.");
+}
+
 fn main() -> io::Result<()> {
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("{}", help_usage_hint());
             std::process::exit(2);
         }
     };
@@ -528,7 +599,7 @@ fn main() -> io::Result<()> {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("{}", help_usage_hint());
             std::process::exit(2);
         }
     };
@@ -536,7 +607,7 @@ fn main() -> io::Result<()> {
         Ok(parsed) => parsed,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("{}", help_usage_hint());
             std::process::exit(2);
         }
     };
@@ -551,7 +622,7 @@ fn main() -> io::Result<()> {
         })
     {
         eprintln!("error: --remote can only be used with the default launch command");
-        eprintln!("run 'herdr --help' for usage");
+        eprintln!("{}", help_usage_hint());
         std::process::exit(2);
     }
 
@@ -605,6 +676,10 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         platform::begin_cli_output();
+        if product::IS_JACQUARD_PRODUCT {
+            print_product_help();
+            return Ok(());
+        }
         println!("herdr — terminal workspace manager for AI coding agents");
         println!();
         println!("Usage: herdr [options]");
@@ -724,13 +799,27 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         platform::begin_cli_output();
-        println!("herdr {}", crate::build_info::version());
+        println!("{} {}", product::NAME, crate::build_info::version());
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--default-config") {
         platform::begin_cli_output();
-        print!("{DEFAULT_CONFIG}");
+        if product::IS_JACQUARD_PRODUCT {
+            // The default config template documents the config location; keep
+            // it aligned with the product app dir instead of upstream path.
+            print!(
+                "{}",
+                DEFAULT_CONFIG
+                    .replace("# herdr configuration", "# jacquard-term configuration")
+                    .replace(
+                        "~/.config/herdr/config.toml",
+                        "~/.config/jacquard-term/config.toml"
+                    )
+            );
+        } else {
+            print!("{DEFAULT_CONFIG}");
+        }
         return Ok(());
     }
 
@@ -757,7 +846,7 @@ fn main() -> io::Result<()> {
         let arg_name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
         if arg.starts_with('-') && !known_flags.contains(&arg_name) {
             eprintln!("unknown option: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("{}", help_usage_hint());
             std::process::exit(2);
         }
         if !arg.starts_with('-')
@@ -779,7 +868,7 @@ fn main() -> io::Result<()> {
             .contains(&arg.as_str())
         {
             eprintln!("unknown command: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("{}", help_usage_hint());
             std::process::exit(2);
         }
     }

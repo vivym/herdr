@@ -588,6 +588,12 @@ fn load_manifest(agent: Agent) -> Option<LoadedManifest> {
 
 fn load_manifest_uncached(agent: Agent) -> Option<LoadedManifest> {
     let bundled = bundled_manifest(agent)?;
+    // `jacquard-product` builds use the manifests bundled into the binary only:
+    // no external catalog download, remote cache or local override manifests
+    // (A1 D9/§6.5).
+    if !crate::product::EXTERNAL_MANIFEST_UPDATES_ENABLED {
+        return Some(bundled_loaded_manifest(agent, bundled, None, None, false));
+    }
     let mut remote = read_remote_manifest(agent, &bundled);
     let cached_remote_version = remote.as_ref().and_then(|loaded| match &loaded.source {
         _ if loaded.cached_remote_version.is_some() => loaded.cached_remote_version.clone(),
@@ -742,6 +748,10 @@ fn read_override_manifest(path: &Path) -> Result<AgentManifest, String> {
 }
 
 fn read_remote_manifest(agent: Agent, bundled: &AgentManifest) -> Option<LoadedManifest> {
+    // Never trust an external remote manifest cache in product builds (D9).
+    if !crate::product::EXTERNAL_MANIFEST_UPDATES_ENABLED {
+        return None;
+    }
     let path = super::manifest_update::remote_manifest_path(agent);
     if !path.exists() {
         return None;

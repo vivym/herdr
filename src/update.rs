@@ -2107,6 +2107,10 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+    if !crate::product::NETWORK_UPDATES_ENABLED {
+        return Err(crate::product::SELF_UPDATE_DISABLED_MESSAGE.to_string());
+    }
+
     let channel = UpdateChannel::configured();
 
     if is_homebrew_managed_install() {
@@ -2346,6 +2350,10 @@ fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
 /// Background update check: only surface availability and release notes.
 /// Runs in a background thread at startup.
 pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    if !crate::product::NETWORK_UPDATES_ENABLED {
+        tracing::debug!("network update checks are disabled in jacquard-term");
+        return;
+    }
     crate::logging::update_check_started();
     if let Ok(version) = env::var(FAKE_UPDATE_VERSION_ENV) {
         let version = version.trim();
@@ -4017,5 +4025,17 @@ mod tests {
                     .is_some_and(|value| value.len() == 64));
             }
         }
+    }
+
+    #[test]
+    #[cfg(feature = "jacquard-product")]
+    fn product_build_rejects_self_update_before_any_network_work() {
+        let error = self_update(SelfUpdateOptions::default())
+            .expect_err("jacquard-product must never self-update");
+        assert!(
+            error.starts_with("self-update is disabled"),
+            "main.rs relies on the shared prefix, got: {error}"
+        );
+        assert!(error.contains("jacquard-term"), "got: {error}");
     }
 }

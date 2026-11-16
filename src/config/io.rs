@@ -19,12 +19,12 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "worktrees",
 ];
 
+/// App directory name used for config/state/socket paths.
+///
+/// The `jacquard-product` build isolates under `jacquard-term`; upstream builds
+/// keep `herdr-dev` (debug) / `herdr` (release).
 pub fn app_dir_name() -> &'static str {
-    if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    }
+    crate::product::app_dir_name()
 }
 
 pub fn config_dir() -> PathBuf {

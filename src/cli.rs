@@ -137,6 +137,15 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
 }
 
 fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
+    // Update channels are a network-self-update concept; `jacquard-product`
+    // builds own their version through the Jacquard release bundle (D9/§6.5).
+    if !crate::product::NETWORK_UPDATES_ENABLED {
+        eprintln!(
+            "channel management is disabled in {}; updates ship with the Jacquard desktop client release bundle",
+            crate::product::NAME
+        );
+        return Ok(1);
+    }
     match args.first().map(|arg| arg.as_str()) {
         Some("set") => channel_set(&args[1..]),
         Some("show") if args.len() == 1 => {

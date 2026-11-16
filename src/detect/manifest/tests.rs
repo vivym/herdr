@@ -907,3 +907,29 @@ contains = ["active"]
 "#;
     assert!(parse_manifest(manifest).is_err());
 }
+
+#[test]
+#[cfg(feature = "jacquard-product")]
+fn product_build_ignores_remote_and_override_manifests() {
+    with_manifest_dirs("product-bundled-only", || {
+        write_remote_codex(&remote_manifest("9999.1.1.1", "working", "remote-marker"));
+        write_local_codex(&local_manifest("working", "local-marker"));
+
+        let summaries = super::manifest_summaries();
+        let codex = summaries
+            .iter()
+            .find(|summary| summary.agent == Agent::Codex)
+            .expect("codex summary");
+        assert!(
+            matches!(&codex.active_source, ManifestSource::Bundled),
+            "product build must use the bundled manifest, got {:?}",
+            codex.active_source
+        );
+        assert!(codex.cached_remote_version.is_none());
+        assert!(!codex.local_override_shadowing_remote);
+
+        // External remote/override markers never apply in the product build.
+        let explain = explain(Agent::Codex, "remote-marker");
+        assert_eq!(explain.state, AgentState::Idle);
+    });
+}

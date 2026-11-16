@@ -8,7 +8,9 @@ use interprocess::local_socket::traits::Stream as _;
 use crate::ipc::LocalStream;
 
 pub const SESSION_ENV_VAR: &str = "HERDR_SESSION";
-pub const DEFAULT_SESSION_NAME: &str = "default";
+/// Default persistent session name; `jacquard` in the `jacquard-product` build
+/// (A1 plan §4.1) and `default` upstream.
+pub const DEFAULT_SESSION_NAME: &str = crate::product::DEFAULT_SESSION_NAME;
 
 const MAX_SESSION_NAME_LEN: usize = 64;
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);

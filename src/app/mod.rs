@@ -179,7 +179,9 @@ pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
 pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 
 fn auto_updates_enabled(background_updates: bool) -> bool {
-    background_updates && !cfg!(debug_assertions)
+    // `jacquard-product` builds never run network update checks: the version
+    // is owned by the Jacquard release bundle (A1 D9/§6.5).
+    background_updates && !cfg!(debug_assertions) && crate::product::NETWORK_UPDATES_ENABLED
 }
 
 fn background_update_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
@@ -3452,5 +3454,17 @@ mod tests {
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
         );
+    }
+
+    #[test]
+    fn product_build_disables_background_network_update_checks() {
+        // Explicitly disabled background updates never check, in any build.
+        assert!(!background_update_check_enabled(false, true));
+        if cfg!(feature = "jacquard-product") {
+            // Product builds must ignore the config opt-in entirely.
+            assert!(!background_update_check_enabled(true, true));
+        } else if !cfg!(debug_assertions) {
+            assert!(background_update_check_enabled(true, true));
+        }
     }
 }

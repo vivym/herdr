@@ -166,6 +166,12 @@ struct CatalogAgent {
 }
 
 pub(crate) fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    // Product builds use the agent manifests bundled into the binary; never
+    // fetch the external catalog in the background (A1 D9/§6.5).
+    if !crate::product::EXTERNAL_MANIFEST_UPDATES_ENABLED {
+        tracing::debug!("external agent-detection manifest updates are disabled in jacquard-term");
+        return;
+    }
     let result = check_and_update();
     let status = match result {
         Ok(output) => {
@@ -233,6 +239,12 @@ pub(crate) struct ManifestUpdateOutput {
 }
 
 pub(crate) fn check_and_update() -> Result<ManifestUpdateOutput, String> {
+    if !crate::product::EXTERNAL_MANIFEST_UPDATES_ENABLED {
+        return Err(
+            "external agent-detection manifest updates are disabled in jacquard-term; agent manifests are bundled with the product"
+                .to_string(),
+        );
+    }
     check_and_update_from_url(&catalog_url())
 }
 
@@ -1008,5 +1020,24 @@ path = "../codex.toml"
 "#
         )
         .is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "jacquard-product")]
+    fn product_build_disables_external_manifest_updates() {
+        let error = check_and_update().expect_err("product build must not fetch the catalog");
+        assert!(error.contains("disabled"), "unexpected error: {error}");
+        assert!(error.contains("jacquard-term"), "unexpected error: {error}");
+    }
+
+    #[test]
+    #[cfg(feature = "jacquard-product")]
+    fn product_build_auto_update_is_a_noop() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        auto_update(tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "product build must not emit background manifest update events"
+        );
     }
 }
