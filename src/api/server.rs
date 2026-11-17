@@ -11,7 +11,8 @@ use tracing::{debug, error, info, warn};
 use std::fs;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
+    BuildIdentity, ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities,
+    SuccessResponse,
 };
 use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::{prompt_agent, wait_for_agent, wait_for_event, wait_for_output};
@@ -68,8 +69,9 @@ pub(crate) fn start_server_with_stop_control(
 }
 
 fn default_capabilities() -> Option<ServerCapabilities> {
+    let platform = crate::platform::capabilities();
     Some(ServerCapabilities {
-        live_handoff: crate::platform::capabilities().live_handoff,
+        live_handoff: platform.live_handoff,
         detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
         managed_session: std::env::var(crate::session::SESSION_ENV_VAR)
             .ok()
@@ -79,6 +81,26 @@ fn default_capabilities() -> Option<ServerCapabilities> {
         surface_interest: true,
         health_check: true,
         ssh_agent_registration: false,
+        build: server_build_identity(),
+        // V-07a: this build contains P1/P2/P3, so a product managed server can
+        // advertise a handoff-capable baseline. `live_handoff` stays platform
+        // gated (Unix only), matching the actual handoff implementation.
+        handoff_baseline: platform
+            .live_handoff
+            .then_some(crate::api::schema::HANDOFF_BASELINE_VERSION),
+    })
+}
+
+/// V-07a: this build's compile-time identity for `capabilities.build`.
+///
+/// Missing values are never fabricated: a build without identity reports no
+/// `build` object, which consumers treat as `identity_unknown` / pre-V-07a.
+fn server_build_identity() -> Option<BuildIdentity> {
+    let identity = crate::build_info::identity();
+    identity.is_known().then(|| BuildIdentity {
+        product_revision: identity.product_revision.map(str::to_owned),
+        fork_commit: identity.fork_commit.map(str::to_owned),
+        build_id: identity.build_id.map(str::to_owned),
     })
 }
 
@@ -1505,6 +1527,8 @@ mod tests {
                 health_check: true,
                 ssh_agent_registration: false,
                 managed_session: Some("jacquard".to_owned()),
+                build: None,
+                handoff_baseline: None,
             }),
             None,
             None,
@@ -1514,6 +1538,59 @@ mod tests {
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn default_capabilities_advertise_the_v07a_handoff_baseline_and_build_identity() {
+        let capabilities = default_capabilities().expect("capabilities");
+        let platform = crate::platform::capabilities();
+
+        assert_eq!(capabilities.live_handoff, platform.live_handoff);
+        assert_eq!(
+            capabilities.handoff_baseline,
+            platform
+                .live_handoff
+                .then_some(crate::api::schema::HANDOFF_BASELINE_VERSION)
+        );
+
+        let identity = crate::build_info::identity();
+        match capabilities.build {
+            Some(build) => {
+                assert_eq!(build.product_revision.as_deref(), identity.product_revision);
+                assert_eq!(build.fork_commit.as_deref(), identity.fork_commit);
+                assert_eq!(build.build_id.as_deref(), identity.build_id);
+            }
+            None => assert!(
+                !identity.is_known(),
+                "a known compile-time identity must be advertised, not hidden"
+            ),
+        }
+    }
+
+    #[test]
+    fn ping_response_advertises_the_v07a_handoff_baseline() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let response = handle_request(
+            Request {
+                id: "ping_v07a".into(),
+                method: Method::Ping(crate::api::schema::PingParams::default()),
+            },
+            &tx,
+            default_capabilities(),
+            None,
+            None,
+            None,
+        );
+
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], "ping_v07a");
+        if crate::platform::capabilities().live_handoff {
+            assert_eq!(
+                response["result"]["capabilities"]["handoff_baseline"],
+                serde_json::json!(crate::api::schema::HANDOFF_BASELINE_VERSION),
+                "a V-07a Unix server must advertise the handoff baseline: {response}"
+            );
+        }
     }
 
     #[test]

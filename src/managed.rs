@@ -873,6 +873,8 @@ mod tests {
                 health_check: true,
                 ssh_agent_registration: false,
                 managed_session: managed_session.map(str::to_owned),
+                build: None,
+                handoff_baseline: None,
             }),
         }
     }

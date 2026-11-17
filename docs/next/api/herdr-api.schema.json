@@ -3858,6 +3858,25 @@
         },
         "ServerLiveHandoffParams": {
           "properties": {
+            "expected_build_id": {
+              "description": "V-07a: expected compile-time build identity of the import binary.\nAdditive optional fields; older sources silently drop them, and older\nimports decode them as absent. The manifest version is not bumped for\nthese gates (`HANDOFF_VERSION` stays 1).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_fork_commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_product_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "expected_protocol": {
               "format": "uint32",
               "minimum": 0,
@@ -6775,6 +6794,30 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "BuildIdentity": {
+          "description": "Build identity advertised by a running server (V-07a).\n\nEvery field is optional: a developer build without compile-time identity\nreports an empty object rather than fabricated values. Field names match\nthe `--version --json` side channel.",
+          "properties": {
+            "build_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fork_commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "product_revision": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
         },
         "ClientWindowTitleReason": {
           "enum": [
@@ -10420,12 +10463,32 @@
         },
         "ServerCapabilities": {
           "properties": {
+            "build": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/BuildIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Compile-time build identity of the running server (V-07a, additive).\n\nAbsent on pre-V-07a servers, which are restart-only for pane-preserving\nupgrades (a pre-V-07a source silently drops the expected-build handoff\ngates, so callers cannot claim build-gated handoff)."
+            },
             "detached_server_daemon": {
               "default": false,
               "type": "boolean"
             },
             "endpoint_protocol_generation": {
               "description": "Stable client-owned endpoint generation supported by this server.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "handoff_baseline": {
+              "description": "Handoff-capable baseline implemented by this server (V-07a, additive).\n`Some(1)` = P1/P2/P3 present; absent on pre-V-07a servers.",
               "format": "uint32",
               "minimum": 0,
               "type": [

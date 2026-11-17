@@ -108,8 +108,7 @@ impl HeadlessServer {
         let manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
-            params.expected_protocol,
-            params.expected_version,
+            &params,
             self.api_window_title.clone(),
             self.host_shutdown_intent.get(),
         );

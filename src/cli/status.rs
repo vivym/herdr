@@ -436,6 +436,8 @@ mod tests {
                 health_check: true,
                 ssh_agent_registration: false,
                 managed_session: None,
+                build: None,
+                handoff_baseline: None,
             }),
         }
     }

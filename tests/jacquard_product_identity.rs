@@ -31,14 +31,41 @@ fn version_prints_the_product_name() {
     let output = product_binary().arg("--version").output().unwrap();
     assert!(output.status.success(), "--version failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.starts_with("jacquard-term "),
-        "--version must start with the product name, got: {stdout}"
+    // V-07a keeps the text form a released golden contract; build identity is a
+    // separate `--version --json` side channel.
+    assert_eq!(
+        stdout, "jacquard-term 0.9.5\n",
+        "--version text must stay the exact product golden string"
     );
+}
+
+#[test]
+fn version_json_reports_the_machine_readable_build_identity() {
+    let output = product_binary()
+        .args(["--version", "--json"])
+        .output()
+        .unwrap();
     assert!(
-        stdout.contains("0.9.5"),
-        "--version must still report the bundled Herdr version, got: {stdout}"
+        output.status.success(),
+        "--version --json failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--version --json must be valid JSON");
+
+    assert_eq!(value["product"], "jacquard-term");
+    assert_eq!(value["name"], "jacquard-term");
+    assert_eq!(value["version"], "0.9.5");
+    assert_eq!(value["base_version"], "0.9.5");
+    assert_eq!(value["channel"], "stable");
+    assert_eq!(value["protocol"], 22);
+    assert_eq!(value["endpoint_protocol_generation"], 1);
+    for field in ["build_id", "product_revision", "fork_commit"] {
+        assert!(
+            value.get(field).is_some(),
+            "the JSON side channel must always carry the {field} key (null is unknown)"
+        );
+    }
 }
 
 #[test]

@@ -728,6 +728,12 @@ fn success_response_round_trips() {
                 health_check: true,
                 ssh_agent_registration: false,
                 managed_session: None,
+                build: Some(BuildIdentity {
+                    product_revision: Some("jq.7".into()),
+                    fork_commit: Some("68846ca".into()),
+                    build_id: Some("7".into()),
+                }),
+                handoff_baseline: Some(HANDOFF_BASELINE_VERSION),
             }),
         },
     };
@@ -735,6 +741,122 @@ fn success_response_round_trips() {
     let json = serde_json::to_string(&response).unwrap();
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, response);
+}
+
+#[test]
+fn server_capabilities_without_v07a_fields_still_decode() {
+    // Pre-V-07a server JSON: absence must mean "unknown", never an error and
+    // never a fabricated identity.
+    let capabilities: ServerCapabilities = serde_json::from_value(serde_json::json!({
+        "live_handoff": true,
+        "detached_server_daemon": true,
+        "endpoint_protocol_generation": 1,
+        "surface_interest": true,
+        "health_check": true,
+        "ssh_agent_registration": false,
+        "managed_session": "jacquard",
+    }))
+    .expect("pre-V-07a capabilities should decode");
+
+    assert!(capabilities.build.is_none());
+    assert!(capabilities.handoff_baseline.is_none());
+}
+
+#[test]
+fn server_capabilities_build_identity_round_trips_and_omits_unknown_fields() {
+    let capabilities = ServerCapabilities {
+        live_handoff: true,
+        detached_server_daemon: true,
+        endpoint_protocol_generation: Some(1),
+        surface_interest: true,
+        health_check: true,
+        ssh_agent_registration: false,
+        managed_session: Some("jacquard".into()),
+        build: Some(BuildIdentity {
+            product_revision: Some("jq.7".into()),
+            fork_commit: None,
+            build_id: Some("7".into()),
+        }),
+        handoff_baseline: Some(HANDOFF_BASELINE_VERSION),
+    };
+
+    let value = serde_json::to_value(&capabilities).unwrap();
+    assert_eq!(value["build"]["product_revision"], "jq.7");
+    assert_eq!(value["build"]["build_id"], "7");
+    assert!(
+        value["build"].get("fork_commit").is_none(),
+        "unknown identity field must be omitted: {value}"
+    );
+    assert_eq!(value["handoff_baseline"], HANDOFF_BASELINE_VERSION);
+
+    let restored: ServerCapabilities = serde_json::from_value(value).unwrap();
+    assert_eq!(restored, capabilities);
+}
+
+#[test]
+fn an_empty_build_identity_is_reported_without_fabricated_values() {
+    let value = serde_json::to_value(BuildIdentity::default()).unwrap();
+    assert_eq!(value, serde_json::json!({}));
+
+    let decoded: BuildIdentity =
+        serde_json::from_value(value).expect("an empty identity should decode");
+    assert_eq!(decoded, BuildIdentity::default());
+}
+
+#[test]
+fn live_handoff_params_default_build_identity_gates_to_absent() {
+    let params = ServerLiveHandoffParams::default();
+
+    assert!(params.expected_build_id.is_none());
+    assert!(params.expected_product_revision.is_none());
+    assert!(params.expected_fork_commit.is_none());
+
+    let value = serde_json::to_value(&params).unwrap();
+    for field in [
+        "expected_build_id",
+        "expected_product_revision",
+        "expected_fork_commit",
+    ] {
+        assert!(
+            value.get(field).is_none(),
+            "absent gate {field} must be omitted from the wire JSON: {value}"
+        );
+    }
+}
+
+#[test]
+fn live_handoff_params_decode_without_expected_build_identity_gates() {
+    let params: ServerLiveHandoffParams = serde_json::from_value(serde_json::json!({
+        "import_exe": "/opt/jacquard/libexec/jacquard-term",
+        "expected_protocol": 22,
+        "expected_version": "0.9.5",
+    }))
+    .expect("pre-V-07a params should decode");
+
+    assert_eq!(params.expected_protocol, Some(22));
+    assert!(params.expected_build_id.is_none());
+    assert!(params.expected_product_revision.is_none());
+    assert!(params.expected_fork_commit.is_none());
+}
+
+#[test]
+fn live_handoff_params_round_trip_expected_build_identity_gates() {
+    let params = ServerLiveHandoffParams {
+        import_exe: Some("/opt/jacquard/libexec/jacquard-term".into()),
+        expected_protocol: Some(22),
+        expected_version: Some("0.9.5".into()),
+        expected_build_id: Some("7".into()),
+        expected_product_revision: Some("jq.7".into()),
+        expected_fork_commit: Some("68846ca".into()),
+    };
+
+    let value = serde_json::to_value(&params).unwrap();
+    assert_eq!(value["expected_build_id"], "7");
+    assert_eq!(value["expected_product_revision"], "jq.7");
+    assert_eq!(value["expected_fork_commit"], "68846ca");
+
+    let restored: ServerLiveHandoffParams = serde_json::from_value(value).unwrap();
+    assert_eq!(restored, params);
 }
 
 #[test]

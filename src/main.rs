@@ -591,6 +591,28 @@ fn print_product_help() {
     println!("Plugins: the plugin marketplace and plugin API remain enabled.");
 }
 
+/// Machine-readable build identity for `--version --json` (V-07a).
+///
+/// This is the deterministic side channel the Jacquard version system probes;
+/// the human `--version` text stays exactly `<product> <version>` for released
+/// product builds. Optional identity values are reported as `null` when the
+/// binary was built without them — callers must treat that as unknown rather
+/// than as a match.
+fn version_json() -> serde_json::Value {
+    serde_json::json!({
+        "product": product::NAME,
+        "name": product::NAME,
+        "version": crate::build_info::version(),
+        "base_version": crate::build_info::BASE_VERSION,
+        "channel": crate::build_info::channel(),
+        "build_id": crate::build_info::build_id(),
+        "product_revision": crate::build_info::product_revision(),
+        "fork_commit": crate::build_info::fork_commit(),
+        "protocol": crate::protocol::PROTOCOL_VERSION,
+        "endpoint_protocol_generation": crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+    })
+}
+
 fn main() -> io::Result<()> {
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
@@ -824,7 +846,14 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         platform::begin_cli_output();
-        println!("{} {}", product::NAME, crate::build_info::version());
+        if args.iter().any(|a| a == "--json") {
+            // V-07a machine-readable identity side channel. The text form below
+            // is a released contract (`jacquard-term 0.9.5` for product builds)
+            // and must stay unchanged.
+            println!("{}", version_json());
+        } else {
+            println!("{} {}", product::NAME, crate::build_info::version());
+        }
         return Ok(());
     }
 
@@ -998,6 +1027,53 @@ mod tests {
         assert_eq!(
             args_as_utf8(args).unwrap_err(),
             "argument 2 is not valid UTF-8"
+        );
+    }
+
+    #[test]
+    fn version_json_reports_the_stable_machine_readable_identity() {
+        let value = version_json();
+
+        assert_eq!(value["product"], product::NAME);
+        assert_eq!(value["name"], product::NAME);
+        assert_eq!(value["version"], crate::build_info::version());
+        assert_eq!(value["base_version"], crate::build_info::BASE_VERSION);
+        assert_eq!(value["channel"], crate::build_info::channel());
+        assert_eq!(
+            value["build_id"],
+            serde_json::to_value(crate::build_info::build_id()).unwrap()
+        );
+        assert_eq!(
+            value["product_revision"],
+            serde_json::to_value(crate::build_info::product_revision()).unwrap()
+        );
+        assert_eq!(
+            value["fork_commit"],
+            serde_json::to_value(crate::build_info::fork_commit()).unwrap()
+        );
+        assert_eq!(
+            value["protocol"],
+            serde_json::json!(crate::protocol::PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            value["endpoint_protocol_generation"],
+            serde_json::json!(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION)
+        );
+        // The side channel must never grow a different visible version string.
+        assert_eq!(
+            value["version"].as_str(),
+            Some(crate::build_info::version().as_str())
+        );
+    }
+
+    #[cfg(feature = "jacquard-product")]
+    #[test]
+    fn product_text_version_stays_the_released_golden_string() {
+        // The text output is a released contract parsed by the Jacquard bundle
+        // tooling; V-07a only adds the `--json` side channel.
+        assert_eq!(
+            format!("{} {}", product::NAME, crate::build_info::version()),
+            "jacquard-term 0.9.5"
         );
     }
 }

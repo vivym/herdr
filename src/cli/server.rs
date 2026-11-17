@@ -205,7 +205,7 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
 fn server_live_handoff(args: &[String]) -> std::io::Result<i32> {
     let Some(params) = parse_live_handoff_params(args) else {
         eprintln!(
-            "usage: herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>]"
+            "usage: herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>] [--expected-build-id <id>] [--expected-product-revision <rev>] [--expected-fork-commit <commit>]"
         );
         return Ok(2);
     };
@@ -254,6 +254,9 @@ fn parse_live_handoff_params(args: &[String]) -> Option<ServerLiveHandoffParams>
                 params.expected_protocol = Some(value.parse().ok()?);
             }
             "--expected-version" => params.expected_version = Some(value),
+            "--expected-build-id" => params.expected_build_id = Some(value),
+            "--expected-product-revision" => params.expected_product_revision = Some(value),
+            "--expected-fork-commit" => params.expected_fork_commit = Some(value),
             _ => return None,
         }
         idx += 1;
@@ -364,6 +367,11 @@ mod tests {
             "--expected-protocol=9".to_string(),
             "--expected-version".to_string(),
             "0.6.2".to_string(),
+            "--expected-build-id".to_string(),
+            "jq.7".to_string(),
+            "--expected-product-revision=jq.7".to_string(),
+            "--expected-fork-commit".to_string(),
+            "68846ca".to_string(),
         ];
 
         let params = parse_live_handoff_params(&args).expect("params");
@@ -374,5 +382,17 @@ mod tests {
         );
         assert_eq!(params.expected_protocol, Some(9));
         assert_eq!(params.expected_version.as_deref(), Some("0.6.2"));
+        assert_eq!(params.expected_build_id.as_deref(), Some("jq.7"));
+        assert_eq!(params.expected_product_revision.as_deref(), Some("jq.7"));
+        assert_eq!(params.expected_fork_commit.as_deref(), Some("68846ca"));
+    }
+
+    #[test]
+    fn live_handoff_params_default_build_identity_gates_are_absent() {
+        let params = parse_live_handoff_params(&[]).expect("params");
+
+        assert!(params.expected_build_id.is_none());
+        assert!(params.expected_product_revision.is_none());
+        assert!(params.expected_fork_commit.is_none());
     }
 }
